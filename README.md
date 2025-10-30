@@ -95,8 +95,11 @@ Output Example:
 At the end of execution, you’ll see:
 
 ✅ Uploaded to Object Storage: datasafe-assessment-2025-10-30-184500.pdf
+
 ✅ Uploaded to Object Storage: datasafe-user-assessment-2025-10-30-184505.pdf
+
 ✅ Uploaded to Object Storage: datasafe-audit-logs-2025-10-30-184510.csv
+
 ✅ Notification with all reports sent successfully!
 
 
