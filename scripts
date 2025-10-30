@@ -1,0 +1,155 @@
+datasafe_daily.sh
+
+#!/bin/bash
+
+# ----------------------------
+# CONFIGURATION VARIABLES
+# ----------------------------
+REGION="us-ashburn-1"                     # OCI region
+SECURITY_ASSESSMENT_OCID="ocid1.datasafesecurityassessment.oc1.iad.abuwcljrtayf6oehwnsqhcdrklvtc57fi5e5zhqiwmdox65fanltgzezvh7a"
+BUCKET_NAME="DataSafe-SecurityAssessment"
+COMPARTMENT_OCID="ocid1.compartment.oc1..aaaaaaaa7ksdb47smsqbyfn7pc2fd7qxmij3n2kisrutq5f3jmebtvjggjua"
+EXISTING_TOPIC_OCID="ocid1.onstopic.oc1.iad.amaaaaaas4n35viajnh53pmaxubxnhmt6qeset7rkrurv43senbfl553dqyq"
+TMPFILE=~/datasafe-assessment.pdf
+USER_ASSESSMENT_OCID="ocid1.datasafeuserassessment.oc1.iad.abuwcljszxjb63kpuffd5sldnruoihelwvwvzbk4g2yzjecjtnwbrn6b3w4q"
+USER_TMPFILE=~/datasafe-user-assessment.pdf
+
+# ----------------------------
+# STEP 1: Generate Security Assessment report
+# ----------------------------
+echo "Generating Data Safe security assessment report..."
+oci data-safe security-assessment generate-security-assessment-report \
+    --security-assessment-id "$SECURITY_ASSESSMENT_OCID" \
+    --format PDF \
+    --region "$REGION"
+
+# ----------------------------
+# STEP 2: Download Security Assessment report
+# ----------------------------
+MAX_TRIES=30
+SLEEP_SECS=15
+i=0
+while [ $i -lt $MAX_TRIES ]; do
+    i=$((i+1))
+    echo "$(date -u) - attempt $i to download the report..."
+    if oci data-safe security-assessment download-security-assessment-report \
+        --security-assessment-id "$SECURITY_ASSESSMENT_OCID" \
+        --format PDF \
+        --file "$TMPFILE" \
+        --region "$REGION"; then
+        echo "✅ Download succeeded -> $TMPFILE"
+        break
+    else
+        echo "Report not ready yet — sleeping $SLEEP_SECS seconds"
+        sleep $SLEEP_SECS
+    fi
+done
+
+[ ! -f "$TMPFILE" ] && echo "ERROR: Report not downloaded" >&2 && exit 2
+
+# ----------------------------
+# STEP 3: Upload Security Assessment report
+# ----------------------------
+NAMESPACE=$(oci os ns get --region "$REGION" --query 'data' --raw-output)
+OBJECT_NAME="datasafe-assessment-$(date +%F-%H%M%S).pdf"
+oci os object put --bucket-name "$BUCKET_NAME" --name "$OBJECT_NAME" --file "$TMPFILE" --namespace "$NAMESPACE" --region "$REGION" --force
+echo "✅ Uploaded to Object Storage: $OBJECT_NAME"
+
+# ----------------------------
+# STEP 4: Create PAR for Security Assessment
+# ----------------------------
+PAR_NAME="${OBJECT_NAME}-par"
+PAR_EXPIRES=$(date -u -d "+7 days" --iso-8601=seconds)
+PAR_JSON=$(oci os preauth-request create --bucket-name "$BUCKET_NAME" --name "$PAR_NAME" --object-name "$OBJECT_NAME" --access-type ObjectRead --time-expires "$PAR_EXPIRES" --namespace "$NAMESPACE" --region "$REGION" --raw-output)
+ACCESS_URI=$(echo "$PAR_JSON" | jq -r '.data["access-uri"]')
+PAR_URL="https://objectstorage.${REGION}.oraclecloud.com${ACCESS_URI}"
+echo "✅ PAR URL: $PAR_URL"
+
+# ----------------------------
+# STEP 5: Generate User Assessment report
+# ----------------------------
+echo "Generating Data Safe user assessment report..."
+oci data-safe user-assessment generate-user-assessment-report --user-assessment-id "$USER_ASSESSMENT_OCID" --format PDF --region "$REGION"
+
+# ----------------------------
+# STEP 6: Download User Assessment report
+# ----------------------------
+i=0
+while [ $i -lt $MAX_TRIES ]; do
+    i=$((i+1))
+    echo "$(date -u) - attempt $i to download the user assessment report..."
+    if oci data-safe user-assessment download-user-assessment-report \
+        --user-assessment-id "$USER_ASSESSMENT_OCID" \
+        --format PDF \
+        --file "$USER_TMPFILE" \
+        --region "$REGION"; then
+        echo "✅ Download succeeded -> $USER_TMPFILE"
+        break
+    else
+        echo "User assessment report not ready yet — sleeping $SLEEP_SECS seconds"
+        sleep $SLEEP_SECS
+    fi
+done
+[ ! -f "$USER_TMPFILE" ] && echo "ERROR: User assessment report not downloaded" >&2 && exit 3
+
+# ----------------------------
+# STEP 7: Upload User Assessment report
+# ----------------------------
+USER_OBJECT_NAME="datasafe-user-assessment-$(date +%F-%H%M%S).pdf"
+oci os object put --bucket-name "$BUCKET_NAME" --name "$USER_OBJECT_NAME" --file "$USER_TMPFILE" --namespace "$NAMESPACE" --region "$REGION" --force
+echo "✅ Uploaded to Object Storage: $USER_OBJECT_NAME"
+
+# ----------------------------
+# STEP 8: Create PAR for User Assessment
+# ----------------------------
+USER_PAR_NAME="${USER_OBJECT_NAME}-par"
+USER_PAR_EXPIRES=$(date -u -d "+7 days" --iso-8601=seconds)
+USER_PAR_JSON=$(oci os preauth-request create --bucket-name "$BUCKET_NAME" --name "$USER_PAR_NAME" --object-name "$USER_OBJECT_NAME" --access-type ObjectRead --time-expires "$USER_PAR_EXPIRES" --namespace "$NAMESPACE" --region "$REGION" --raw-output)
+USER_ACCESS_URI=$(echo "$USER_PAR_JSON" | jq -r '.data["access-uri"]')
+USER_PAR_URL="https://objectstorage.${REGION}.oraclecloud.com${USER_ACCESS_URI}"
+echo "✅ User Assessment PAR URL: $USER_PAR_URL"
+
+# ----------------------------
+# STEP 9: Generate Audit Logs report
+# ----------------------------
+COMPARTMENT_ID="ocid1.compartment.oc1..aaaaaaaa7ksdb47smsqbyfn7pc2fd7qxmij3n2kisrutq5f3jmebtvjggjua"
+OUTPUT_DIR="."
+XLS_FILE="DS_AZ_OCI_Custom_External_User_Report_$(date +'%Y%m%d%H%M').xls"
+CSV_FILE="${XLS_FILE%.xls}.csv"
+CLEANED_FILE="cleaned_audit_records_externalUsers.csv"
+FINAL_FILE="cleaned_audit_records_final.csv"
+
+export SUPPRESS_LABEL_WARNING=True
+echo "Downloading latest OCI Data Safe audit report..."
+REPORT_ID=$(oci data-safe report-summary list-reports --compartment-id "$COMPARTMENT_ID" --all | \
+  jq -r '.data.items | map(select(.["display-name"] | startswith("DS_AZ_OCI_Custom_External_User_Report"))) | sort_by(.["time-generated"]) | reverse | .[0].id')
+oci data-safe report get-report-content --file "$XLS_FILE" --report-id "$REPORT_ID"
+libreoffice --headless --convert-to csv "$XLS_FILE" --outdir "$OUTPUT_DIR"
+tail -n +12 "$CSV_FILE" > "$CLEANED_FILE"
+awk -F',' '{print $1","$2","$3","$4","$5","$6","$7","$9","$12}' "$CLEANED_FILE" > "$FINAL_FILE"
+cp "$FINAL_FILE" "${FINAL_FILE}.bak"
+awk -F',' 'BEGIN { OFS="," } NR==1 { print; next } /^,+$/ { next } /^ *,+$/ { next } /^Target :/ { next } $1=="Target" && $2=="DB user" { next } NF < 9 { next } { if ($8 !~ /Z$/) $8 = $8 "Z"; print }' "${FINAL_FILE}.bak" > "$FINAL_FILE"
+
+# ----------------------------
+# STEP 10: Upload Audit Logs
+# ----------------------------
+AUDIT_OBJECT_NAME="datasafe-audit-logs-$(date +%F-%H%M%S).csv"
+oci os object put --bucket-name "$BUCKET_NAME" --name "$AUDIT_OBJECT_NAME" --file "$FINAL_FILE" --namespace "$NAMESPACE" --region "$REGION" --force
+echo "✅ Uploaded to Object Storage: $AUDIT_OBJECT_NAME"
+
+# ----------------------------
+# STEP 11: Create PAR for Audit Logs
+# ----------------------------
+AUDIT_PAR_NAME="${AUDIT_OBJECT_NAME}-par"
+AUDIT_PAR_EXPIRES=$(date -u -d "+7 days" --iso-8601=seconds)
+AUDIT_PAR_JSON=$(oci os preauth-request create --bucket-name "$BUCKET_NAME" --name "$AUDIT_PAR_NAME" --object-name "$AUDIT_OBJECT_NAME" --access-type ObjectRead --time-expires "$AUDIT_PAR_EXPIRES" --namespace "$NAMESPACE" --region "$REGION" --raw-output)
+AUDIT_ACCESS_URI=$(echo "$AUDIT_PAR_JSON" | jq -r '.data["access-uri"]')
+AUDIT_PAR_URL="https://objectstorage.${REGION}.oraclecloud.com${AUDIT_ACCESS_URI}"
+echo "✅ Audit Logs PAR URL: $AUDIT_PAR_URL"
+
+# ----------------------------
+# STEP 12: Publish a single notification with all three reports
+# ----------------------------
+MSG="Hello,\n\nYour Data Safe reports are available. Download links (expire in 7 days):\n\nSecurity Assessment: $PAR_URL\nUser Assessment: $USER_PAR_URL\nAudit Logs: $AUDIT_PAR_URL\n\nRegards."
+oci ons message publish --topic-id "$EXISTING_TOPIC_OCID" --body "$MSG"
+echo "✅ Notification with all reports sent successfully!"
