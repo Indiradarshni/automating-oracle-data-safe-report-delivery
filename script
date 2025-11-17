@@ -1,0 +1,130 @@
+datasafe-reports.sh
+
+#!/bin/bash
+
+#############################################
+# CONFIGURATION VARIABLES
+#############################################
+REGION="us-ashburn-1"
+SECURITY_ASSESSMENT_OCID="ocid1.datasafesecurityassessment.oc1.iad.abuwcljrtayf6oehwnsqhcdrklvtc57fi5e5zhqiwmdox65fanltgzezvh7a"
+USER_ASSESSMENT_OCID="ocid1.datasafeuserassessment.oc1.iad.abuwcljszxjb63kpuffd5sldnruoihelwvwvzbk4g2yzjecjtnwbrn6b3w4q"
+AUDIT_REPORT_ID="ocid1.datasafereport.oc1.iad.abuwcljrcwgzquke2ry7hku3f7swj4ylf4ohttzrybrp4ezmpygxv5zyedca"
+
+BUCKET_NAME="DataSafe-SecurityAssessment"
+EXISTING_TOPIC_OCID="ocid1.onstopic.oc1.iad.amaaaaaas4n35viajnh53pmaxubxnhmt6qeset7rkrurv43senbfl553dqyq"
+
+TMPFILE=~/datasafe-assessment.pdf
+USER_TMPFILE=~/datasafe-user-assessment.pdf
+AUDIT_PDF_FILE=~/datasafe-audit-report.pdf
+
+MAX_TRIES=30
+SLEEP_SECS=15
+
+#############################################
+# UTILITIES
+#############################################
+
+# Run command silently
+run_silent() {
+    "$@" 2>/dev/null
+}
+
+# 7 days ISO-8601 timestamp
+future_time() {
+    date -u -Iseconds -d "+7 days"
+}
+
+# Generate a PAR URL
+get_par_url() {
+    local object_name="$1"
+    local par_name="$2"
+    local expires="$3"
+    local namespace="$4"
+
+    local par_uri
+    par_uri=$(run_silent oci os preauth-request create \
+        --bucket-name "$BUCKET_NAME" \
+        --name "$par_name" \
+        --object-name "$object_name" \
+        --access-type ObjectRead \
+        --time-expires "$expires" \
+        --namespace "$namespace" \
+        --region "$REGION" \
+        --raw-output | jq -r '.data."access-uri"')
+
+    echo "https://objectstorage.${REGION}.oraclecloud.com${par_uri}"
+}
+
+#############################################
+# MAIN SCRIPT
+#############################################
+
+# Get Object Storage namespace
+NAMESPACE=$(run_silent oci os ns get --query 'data' --raw-output --region "$REGION")
+
+# --- SECURITY ASSESSMENT REPORT ---
+echo "Generating Security Assessment..."
+run_silent oci data-safe security-assessment generate-security-assessment-report \
+    --security-assessment-id "$SECURITY_ASSESSMENT_OCID" --format PDF --region "$REGION"
+
+i=0
+while [ $i -lt $MAX_TRIES ]; do
+    i=$((i+1))
+    run_silent oci data-safe security-assessment download-security-assessment-report \
+        --security-assessment-id "$SECURITY_ASSESSMENT_OCID" --format PDF --file "$TMPFILE" --region "$REGION" && break
+    sleep $SLEEP_SECS
+done
+[ ! -f "$TMPFILE" ] && echo "ERROR: Security Assessment not downloaded!" && exit 1
+
+SEC_OBJECT_NAME="datasafe-assessment-$(date +%F-%H%M%S).pdf"
+run_silent oci os object put --bucket-name "$BUCKET_NAME" --name "$SEC_OBJECT_NAME" --file "$TMPFILE" --namespace "$NAMESPACE" --region "$REGION" --force
+
+SEC_PAR_URL=$(get_par_url "$SEC_OBJECT_NAME" "${SEC_OBJECT_NAME}-par" "$(future_time)" "$NAMESPACE")
+echo "Security Assessment PAR URL: $SEC_PAR_URL"
+
+# --- USER ASSESSMENT REPORT ---
+echo "Generating User Assessment..."
+run_silent oci data-safe user-assessment generate-user-assessment-report \
+    --user-assessment-id "$USER_ASSESSMENT_OCID" --format PDF --region "$REGION"
+
+i=0
+while [ $i -lt $MAX_TRIES ]; do
+    i=$((i+1))
+    run_silent oci data-safe user-assessment download-user-assessment-report \
+        --user-assessment-id "$USER_ASSESSMENT_OCID" --format PDF --file "$USER_TMPFILE" --region "$REGION" && break
+    sleep $SLEEP_SECS
+done
+[ ! -f "$USER_TMPFILE" ] && echo "ERROR: User Assessment not downloaded!" && exit 2
+
+USER_OBJECT_NAME="datasafe-user-assessment-$(date +%F-%H%M%S).pdf"
+run_silent oci os object put --bucket-name "$BUCKET_NAME" --name "$USER_OBJECT_NAME" --file "$USER_TMPFILE" --namespace "$NAMESPACE" --region "$REGION" --force
+
+USER_PAR_URL=$(get_par_url "$USER_OBJECT_NAME" "${USER_OBJECT_NAME}-par" "$(future_time)" "$NAMESPACE")
+echo "User Assessment PAR URL: $USER_PAR_URL"
+
+# --- AUDIT REPORT ---
+echo "Downloading Audit PDF..."
+run_silent oci data-safe report get-report-content --report-id "$AUDIT_REPORT_ID" --file "$AUDIT_PDF_FILE" --region "$REGION"
+
+AUDIT_OBJECT_NAME="datasafe-audit-pdf-$(date +%F-%H%M%S).pdf"
+run_silent oci os object put --bucket-name "$BUCKET_NAME" --name "$AUDIT_OBJECT_NAME" --file "$AUDIT_PDF_FILE" --namespace "$NAMESPACE" --region "$REGION" --force
+
+AUDIT_PAR_URL=$(get_par_url "$AUDIT_OBJECT_NAME" "${AUDIT_OBJECT_NAME}-par" "$(future_time)" "$NAMESPACE")
+echo "Audit PDF PAR URL: $AUDIT_PAR_URL"
+
+# --- SEND NOTIFICATION ---
+MSG=$(cat <<EOF
+Hello,
+
+Your Data Safe reports are available (links expire in 7 days):
+
+Security Assessment: $SEC_PAR_URL
+User Assessment: $USER_PAR_URL
+Audit Log PDF: $AUDIT_PAR_URL
+
+Regards.
+EOF
+)
+
+run_silent oci ons message publish --topic-id "$EXISTING_TOPIC_OCID" --body "$MSG"
+echo "✅ Notification sent successfully!"
