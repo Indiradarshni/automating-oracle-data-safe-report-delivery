@@ -1,24 +1,35 @@
-datasafe-reports.sh
+oci_datasafe_reports.sh
 
 #!/bin/bash
 
 #############################################
-# CONFIGURATION VARIABLES
+# CONFIGURATION VARIABLES (populate the values)
 #############################################
-REGION="us-ashburn-1"
-SECURITY_ASSESSMENT_OCID="ocid1.datasafesecurityassessment.oc1.iad.abuwcljrtayf6oehwnsqhcdrklvtc57fi5e5zhqiwmdox65fanltgzezvh7a"
-USER_ASSESSMENT_OCID="ocid1.datasafeuserassessment.oc1.iad.abuwcljszxjb63kpuffd5sldnruoihelwvwvzbk4g2yzjecjtnwbrn6b3w4q"
-AUDIT_REPORT_ID="ocid1.datasafereport.oc1.iad.abuwcljrcwgzquke2ry7hku3f7swj4ylf4ohttzrybrp4ezmpygxv5zyedca"
 
+REGION="us-ashburn-1"  # OCI region
+
+# TODO: Replace with your Security Assessment OCID
+SECURITY_ASSESSMENT_OCID="ocid1.datasafesecurityassessment.oc1.iad.*******"
+
+# TODO: Replace with your User Assessment OCID
+USER_ASSESSMENT_OCID="ocid1.datasafeuserassessment.oc1.iad.*******"
+
+# TODO: Replace with your Audit Report OCID
+AUDIT_REPORT_ID="ocid1.datasafereport.oc1.iad.*******"
+
+# TODO: Replace with your Object Storage bucket name
 BUCKET_NAME="DataSafe-SecurityAssessment"
+
+# TODO: Replace with your Notification Topic OCID
 EXISTING_TOPIC_OCID="ocid1.onstopic.oc1.iad.amaaaaaas4n35viajnh53pmaxubxnhmt6qeset7rkrurv43senbfl553dqyq"
 
 TMPFILE=~/datasafe-assessment.pdf
 USER_TMPFILE=~/datasafe-user-assessment.pdf
 AUDIT_PDF_FILE=~/datasafe-audit-report.pdf
 
-MAX_TRIES=30
-SLEEP_SECS=15
+# Optimized retry values
+MAX_TRIES=15    # number of retries for downloads
+SLEEP_SECS=5    # seconds to wait between retries
 
 #############################################
 # UTILITIES
@@ -29,9 +40,9 @@ run_silent() {
     "$@" 2>/dev/null
 }
 
-# 7 days ISO-8601 timestamp
+# 1 day ISO-8601 timestamp for PAR URL expiry
 future_time() {
-    date -u -Iseconds -d "+7 days"
+    date -u -Iseconds -d "+1 days"
 }
 
 # Generate a PAR URL
@@ -104,7 +115,13 @@ echo "User Assessment PAR URL: $USER_PAR_URL"
 
 # --- AUDIT REPORT ---
 echo "Downloading Audit PDF..."
-run_silent oci data-safe report get-report-content --report-id "$AUDIT_REPORT_ID" --file "$AUDIT_PDF_FILE" --region "$REGION"
+i=0
+while [ $i -lt $MAX_TRIES ]; do
+    i=$((i+1))
+    run_silent oci data-safe report get-report-content --report-id "$AUDIT_REPORT_ID" --file "$AUDIT_PDF_FILE" --region "$REGION" && break
+    sleep $SLEEP_SECS
+done
+[ ! -f "$AUDIT_PDF_FILE" ] && echo "ERROR: Audit PDF not downloaded!" && exit 3
 
 AUDIT_OBJECT_NAME="datasafe-audit-pdf-$(date +%F-%H%M%S).pdf"
 run_silent oci os object put --bucket-name "$BUCKET_NAME" --name "$AUDIT_OBJECT_NAME" --file "$AUDIT_PDF_FILE" --namespace "$NAMESPACE" --region "$REGION" --force
@@ -116,7 +133,7 @@ echo "Audit PDF PAR URL: $AUDIT_PAR_URL"
 MSG=$(cat <<EOF
 Hello,
 
-Your Data Safe reports are available (links expire in 7 days):
+Your Data Safe reports are available (links expire in 1 day):
 
 Security Assessment: $SEC_PAR_URL
 User Assessment: $USER_PAR_URL
