@@ -21,7 +21,7 @@ AUDIT_REPORT_ID="ocid1.datasafereport.oc1.iad.*******"
 BUCKET_NAME="DataSafe-SecurityAssessment"
 
 # TODO: Replace with your Notification Topic OCID
-EXISTING_TOPIC_OCID="ocid1.onstopic.oc1.iad.amaaaaaas4n35viajnh53pmaxubxnhmt6qeset7rkrurv43senbfl553dqyq"
+EXISTING_TOPIC_OCID="ocid1.onstopic.oc1.iad.******"
 
 TMPFILE=~/datasafe-assessment.pdf
 USER_TMPFILE=~/datasafe-user-assessment.pdf
